@@ -42,7 +42,7 @@ export async function uploadToCloudinary(buffer, mimeType, publicId, env) {
   form.append('api_key',    CLOUDINARY_API_KEY);
   form.append('signature',  signature);
 
-  const uploadUrl = `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`;
+  const uploadUrl = `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/auto/upload`;
 
   const res = await fetch(uploadUrl, { method: 'POST', body: form });
 

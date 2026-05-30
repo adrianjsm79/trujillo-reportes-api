@@ -102,7 +102,7 @@ reports.get('/map', async (c) => {
   const rows = await c.env.DB.prepare(`
     SELECT
       r.id, r.title, r.status, r.latitude, r.longitude,
-      r.vote_count, r.image_url,
+      r.vote_count, r.image_url, r.media,
       c.name AS category_name, c.icon AS category_icon, c.color AS category_color
     FROM reports r
     LEFT JOIN categories c ON r.category_id = c.id
@@ -111,7 +111,13 @@ reports.get('/map', async (c) => {
     LIMIT 500
   `).bind(...bindings).all();
 
-  return ok(c, { markers: rows.results });
+  // Parsear la columna JSON 'media'
+  const markers = rows.results.map(r => ({
+    ...r,
+    media: r.media ? JSON.parse(r.media) : (r.image_url ? [r.image_url] : [])
+  }));
+
+  return ok(c, { markers });
 });
 
 // ── Detalle de un reporte ─────────────────────────────────
@@ -131,6 +137,8 @@ reports.get('/:id', optionalAuth, async (c) => {
   `).bind(id).first();
 
   if (!report) return err(c, 'Reporte no encontrado', 404);
+
+  report.media = report.media ? JSON.parse(report.media) : (report.image_url ? [report.image_url] : []);
 
   // Ver si el usuario actual ya votó
   const user = c.get('user');
@@ -184,8 +192,8 @@ reports.post('/', optionalAuth, async (c) => {
   return ok(c, report, 201);
 });
 
-// ── Subir imagen a Cloudinary ─────────────────────────────
-reports.post('/:id/image', optionalAuth, async (c) => {
+// ── Subir multimedia a Cloudinary ─────────────────────────────
+reports.post('/:id/media', optionalAuth, async (c) => {
   const { id } = c.req.param();
   const user   = c.get('user');
 
@@ -195,45 +203,51 @@ reports.post('/:id/image', optionalAuth, async (c) => {
 
   // Lógica de permisos
   if (report.user_id) {
-    // Si el reporte pertenece a un usuario, debe estar logueado y ser el dueño (o admin)
     if (!user) return err(c, 'Token requerido', 401);
     if (report.user_id !== user.id && user.role !== 'admin')
       return err(c, 'Sin permisos', 403);
   } else {
-    // Si el reporte es anónimo, permitimos subir imagen solo si aún no tiene una
-    // para evitar que cualquiera sobreescriba imágenes de reportes anónimos.
-    if (report.image_url) {
-      return err(c, 'Este reporte anónimo ya tiene una imagen asociada', 403);
+    if (report.media || report.image_url) {
+      return err(c, 'Este reporte anónimo ya tiene contenido multimedia', 403);
     }
   }
 
   const formData = await c.req.formData();
-  const file     = formData.get('image');
-  if (!file) return err(c, 'Imagen requerida');
+  const files    = formData.getAll('media'); // Puede ser un array de archivos
+  if (!files || files.length === 0) return err(c, 'Archivos requeridos');
 
-  const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
-  if (!allowedTypes.includes(file.type)) return err(c, 'Solo se permiten imágenes JPEG, PNG o WebP');
+  const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'video/mp4', 'video/webm'];
+  
+  const uploadedUrls = [];
 
-  const maxSize = 5 * 1024 * 1024; // 5MB
-  if (file.size > maxSize) return err(c, 'La imagen no puede superar 5MB');
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    if (!allowedTypes.includes(file.type)) {
+      return err(c, `Formato no permitido: ${file.type}. Solo JPG, PNG, WebP, MP4, WebM.`);
+    }
 
-  const buffer   = await file.arrayBuffer();
-  // public_id sin extensión; Cloudinary la gestiona automáticamente.
-  // Usar el ID del reporte garantiza que una re-subida sobreescribe la imagen anterior.
-  const publicId = `reports/${id}`;
+    const maxSize = 20 * 1024 * 1024; // 20MB max por archivo
+    if (file.size > maxSize) return err(c, `El archivo no puede superar 20MB`);
 
-  let imageUrl;
-  try {
-    imageUrl = await uploadToCloudinary(buffer, file.type, publicId, c.env);
-  } catch (e) {
-    console.error('Cloudinary upload failed:', e.message);
-    return err(c, 'Error al subir la imagen. Intenta de nuevo.', 502);
+    const buffer = await file.arrayBuffer();
+    const publicId = `reports/${id}_media_${i}`;
+
+    try {
+      const url = await uploadToCloudinary(buffer, file.type, publicId, c.env);
+      uploadedUrls.push(url);
+    } catch (e) {
+      console.error('Cloudinary upload failed:', e.message);
+      return err(c, 'Error al subir los archivos. Intenta de nuevo.', 502);
+    }
   }
 
-  await c.env.DB.prepare('UPDATE reports SET image_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
-    .bind(imageUrl, id).run();
+  const mediaJson = JSON.stringify(uploadedUrls);
 
-  return ok(c, { image_url: imageUrl });
+  // Guardamos en la nueva columna media, y por retrocompatibilidad guardamos el primero en image_url
+  await c.env.DB.prepare('UPDATE reports SET media = ?, image_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+    .bind(mediaJson, uploadedUrls[0] || null, id).run();
+
+  return ok(c, { media: uploadedUrls });
 });
 
 // ── Editar reporte ────────────────────────────────────────
