@@ -28,14 +28,9 @@ export async function uploadToCloudinary(buffer, mimeType, publicId, env) {
   const timestamp     = Math.floor(Date.now() / 1000).toString();
   const paramsToSign  = `public_id=${publicId}&timestamp=${timestamp}`;
 
-  // Cloudinary acepta SHA-1 o SHA-256 según la config de la cuenta.
-  // Intentamos SHA-256 primero (cuentas nuevas), con fallback a SHA-1.
-  let signature;
-  try {
-    signature = await hmacSha256(paramsToSign, CLOUDINARY_API_SECRET);
-  } catch {
-    signature = await hmacSha1(paramsToSign, CLOUDINARY_API_SECRET);
-  }
+  // Cloudinary requiere un hash SHA-1 de los parámetros concatenados con el API secret
+  const stringToSign = `${paramsToSign}${CLOUDINARY_API_SECRET}`;
+  const signature = await sha1(stringToSign);
 
   // Construir el FormData para el upload
   const form = new FormData();
@@ -65,36 +60,12 @@ export async function uploadToCloudinary(buffer, mimeType, publicId, env) {
   return data.secure_url;
 }
 
-// ── HMAC-SHA256 (cuentas nuevas de Cloudinary) ──────────────
-async function hmacSha256(message, secret) {
-  const enc     = new TextEncoder();
-  const keyData = enc.encode(secret);
-  const msgData = enc.encode(message);
-
-  const cryptoKey = await crypto.subtle.importKey(
-    'raw', keyData,
-    { name: 'HMAC', hash: 'SHA-256' },
-    false, ['sign']
-  );
-
-  const sig = await crypto.subtle.sign('HMAC', cryptoKey, msgData);
-  return toHex(sig);
-}
-
-// ── HMAC-SHA1 (cuentas antiguas de Cloudinary) ──────────────
-async function hmacSha1(message, secret) {
-  const enc     = new TextEncoder();
-  const keyData = enc.encode(secret);
-  const msgData = enc.encode(message);
-
-  const cryptoKey = await crypto.subtle.importKey(
-    'raw', keyData,
-    { name: 'HMAC', hash: 'SHA-1' },
-    false, ['sign']
-  );
-
-  const sig = await crypto.subtle.sign('HMAC', cryptoKey, msgData);
-  return toHex(sig);
+// ── SHA-1 (Estándar de Cloudinary) ──────────────
+async function sha1(message) {
+  const enc = new TextEncoder();
+  const data = enc.encode(message);
+  const hashBuffer = await crypto.subtle.digest('SHA-1', data);
+  return toHex(hashBuffer);
 }
 
 function toHex(buffer) {
