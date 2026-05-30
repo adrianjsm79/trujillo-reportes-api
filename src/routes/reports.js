@@ -185,15 +185,27 @@ reports.post('/', optionalAuth, async (c) => {
 });
 
 // ── Subir imagen a Cloudinary ─────────────────────────────
-reports.post('/:id/image', requireAuth, async (c) => {
+reports.post('/:id/image', optionalAuth, async (c) => {
   const { id } = c.req.param();
   const user   = c.get('user');
 
-  // Verificar que el reporte existe y pertenece al usuario (o es admin)
+  // Verificar que el reporte existe
   const report = await c.env.DB.prepare('SELECT * FROM reports WHERE id = ?').bind(id).first();
   if (!report) return err(c, 'Reporte no encontrado', 404);
-  if (report.user_id !== user.id && user.role !== 'admin')
-    return err(c, 'Sin permisos', 403);
+
+  // Lógica de permisos
+  if (report.user_id) {
+    // Si el reporte pertenece a un usuario, debe estar logueado y ser el dueño (o admin)
+    if (!user) return err(c, 'Token requerido', 401);
+    if (report.user_id !== user.id && user.role !== 'admin')
+      return err(c, 'Sin permisos', 403);
+  } else {
+    // Si el reporte es anónimo, permitimos subir imagen solo si aún no tiene una
+    // para evitar que cualquiera sobreescriba imágenes de reportes anónimos.
+    if (report.image_url) {
+      return err(c, 'Este reporte anónimo ya tiene una imagen asociada', 403);
+    }
+  }
 
   const formData = await c.req.formData();
   const file     = formData.get('image');
