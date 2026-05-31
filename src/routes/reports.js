@@ -126,6 +126,57 @@ reports.get('/map', async (c) => {
   return ok(c, { markers });
 });
 
+// ── Top reportes más votados (para sección Urgentes) ─────
+reports.get('/top', async (c) => {
+  const limit = parseInt(c.req.query('limit') || '5', 10);
+
+  const rows = await c.env.DB.prepare(`
+    SELECT
+      r.id, r.title, r.status, r.vote_count, r.comment_count,
+      r.district, r.address, r.image_url, r.media, r.created_at,
+      r.is_anonymous, r.latitude, r.longitude,
+      c.name AS category_name, c.icon AS category_icon,
+      CASE WHEN r.is_anonymous = 1 THEN NULL ELSE u.username END AS author_username
+    FROM reports r
+    LEFT JOIN categories c ON r.category_id = c.id
+    LEFT JOIN users u ON r.user_id = u.id
+    WHERE r.status != 'resolved' AND r.status != 'rejected'
+    ORDER BY r.vote_count DESC, r.created_at DESC
+    LIMIT ?
+  `).bind(limit).all();
+
+  const top = rows.results.map(r => ({
+    ...r,
+    media: r.media ? JSON.parse(r.media) : (r.image_url ? [r.image_url] : [])
+  }));
+
+  return ok(c, { reports: top });
+});
+
+// ── Historial de actividad público de un reporte ──────────
+reports.get('/:id/history', async (c) => {
+  const { id } = c.req.param();
+
+  const report = await c.env.DB.prepare('SELECT id, created_at, status, assigned_to, is_anonymous, user_id FROM reports WHERE id = ?').bind(id).first();
+  if (!report) return err(c, 'Reporte no encontrado', 404);
+
+  const history = await c.env.DB.prepare(`
+    SELECT
+      sh.id, sh.old_status, sh.new_status, sh.note, sh.created_at,
+      u.username AS changed_by_username
+    FROM status_history sh
+    LEFT JOIN users u ON sh.changed_by = u.id
+    WHERE sh.report_id = ?
+    ORDER BY sh.created_at ASC
+  `).bind(id).all();
+
+  return ok(c, {
+    created_at:  report.created_at,
+    assigned_to: report.assigned_to,
+    history:     history.results
+  });
+});
+
 // ── Detalle de un reporte ─────────────────────────────────
 reports.get('/:id', optionalAuth, async (c) => {
   const { id } = c.req.param();
@@ -144,7 +195,8 @@ reports.get('/:id', optionalAuth, async (c) => {
 
   if (!report) return err(c, 'Reporte no encontrado', 404);
 
-  report.media = report.media ? JSON.parse(report.media) : (report.image_url ? [report.image_url] : []);
+  report.media           = report.media           ? JSON.parse(report.media)           : (report.image_url ? [report.image_url] : []);
+  report.resolution_media = report.resolution_media ? JSON.parse(report.resolution_media) : [];
 
   // Ver si el usuario actual ya votó
   const user = c.get('user');
@@ -299,6 +351,44 @@ reports.delete('/:id', requireAuth, async (c) => {
 
   await c.env.DB.prepare('DELETE FROM reports WHERE id = ?').bind(id).run();
   return ok(c, { message: 'Reporte eliminado' });
+});
+
+// ── Subir evidencia de resolución (autoridades) ──────────
+reports.post('/:id/resolution-media', async (c) => {
+  const { id }  = c.req.param();
+  const authHeader = c.req.header('Authorization');
+  if (!authHeader) return err(c, 'Token requerido', 401);
+
+  const report = await c.env.DB.prepare('SELECT * FROM reports WHERE id = ?').bind(id).first();
+  if (!report) return err(c, 'Reporte no encontrado', 404);
+
+  const formData = await c.req.formData();
+  const files    = formData.getAll('media');
+  if (!files || files.length === 0) return err(c, 'Archivos requeridos');
+
+  const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'video/mp4', 'video/webm'];
+  const existing = report.resolution_media ? JSON.parse(report.resolution_media) : [];
+  const uploadedUrls = [...existing];
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    if (!allowedTypes.includes(file.type)) return err(c, `Formato no permitido: ${file.type}`);
+    if (file.size > 20 * 1024 * 1024) return err(c, 'Archivo mayor a 20MB');
+
+    const buffer   = await file.arrayBuffer();
+    const publicId = `reports/${id}_resolution_${uploadedUrls.length}`;
+    try {
+      const url = await uploadToCloudinary(buffer, file.type, publicId, c.env);
+      uploadedUrls.push(url);
+    } catch (e) {
+      return err(c, 'Error al subir el archivo a Cloudinary', 502);
+    }
+  }
+
+  await c.env.DB.prepare('UPDATE reports SET resolution_media = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+    .bind(JSON.stringify(uploadedUrls), id).run();
+
+  return ok(c, { resolution_media: uploadedUrls });
 });
 
 export default reports;
