@@ -51,7 +51,7 @@ reports.get('/', optionalAuth, async (c) => {
     SELECT
       r.id, r.title, r.description, r.status, r.is_anonymous,
       r.latitude, r.longitude, r.address, r.district,
-      r.image_url, r.vote_count, r.comment_count, r.view_count,
+      r.image_url, r.media, r.vote_count, r.comment_count, r.view_count,
       r.created_at, r.updated_at, r.official_response,
       c.name AS category_name, c.icon AS category_icon, c.color AS category_color,
       CASE WHEN r.is_anonymous = 1 THEN NULL ELSE u.username END AS author_username,
@@ -75,8 +75,14 @@ reports.get('/', optionalAuth, async (c) => {
   // Incrementar vistas en background (sin bloquear)
   // No es crítico para el prototipo
 
+  // Parsear la columna JSON 'media' de cada reporte
+  const reportsList = rows.results.map(r => ({
+    ...r,
+    media: r.media ? JSON.parse(r.media) : (r.image_url ? [r.image_url] : [])
+  }));
+
   return ok(c, {
-    reports:  rows.results,
+    reports:  reportsList,
     pagination: {
       page,
       limit,
